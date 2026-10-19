@@ -1,221 +1,127 @@
 
-import re
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.assistant_schemas import AssistantQuestion, AssistantResponse
-from app.auth_routes import get_current_user
-from app.community_routes import create_assistant_question
-from app.dependencies import get_db
-from app.knowledge_models import KnowledgeEntry
-from app.models import User
+from app.database import SessionLocal
+from app.assistant_schemas import AssistantRequest, AssistantResponse
+from app.assistant_service import create_assistant_question
 
 
 router = APIRouter(
     prefix="/assistant",
-    tags=["Local Knowledge Assistant"],
+    tags=["Assistant"]
 )
 
 
-# English question words and common filler words.
-STOP_WORDS = {
-    "a", "an", "the", "is", "are", "was", "were",
-    "what", "how", "when", "where", "why", "which",
-    "can", "could", "should", "would", "do", "does",
-    "did", "i", "we", "you", "my", "our", "your",
-    "for", "to", "of", "in", "on", "at", "and",
-    "or", "with", "from", "about", "please", "tell",
-    "me", "give", "explain", "need", "want", "it",
-    "this", "that", "be", "isn't", "not",
+# --------------------------------------------------
+# Database dependency
+# --------------------------------------------------
 
-    # Common Tamil question words and grammatical particles.
-    "எப்படி", "எப்படிக்", "எப்படியாவது",
-    "என்ன", "எப்போது", "எங்கே", "ஏன்",
-    "என்பது", "ஒரு", "மற்றும்",
-    "இல்", "க்கு", "உடன்",
-}
+def get_db():
+    db = SessionLocal()
+
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-# Map English synonyms to common concepts.
-SYNONYM_GROUPS = [
-    {"paddy", "rice", "nell"},
-    {"pest", "pests", "insect", "insects"},
-    {"control", "management", "manage"},
-    {"fertilizer", "fertiliser", "manure"},
-    {"disease", "diseases", "infection"},
-    {"water", "irrigation", "watering"},
-    {"soil", "land", "field"},
-    {"crop", "crops", "plant", "plants"},
-    {"weed", "weeds", "weeding"},
-    {"yield", "production", "harvest"},
-    {"seed", "seeds", "sowing"},
-    {"organic", "natural"},
-    {"yellow", "yellowing"},
-    {"leaves", "leaf"},
-    {"tomato", "tomatoes"},
-]
+# --------------------------------------------------
+# Text processing helpers
+# --------------------------------------------------
 
-SYNONYM_LOOKUP = {
-    word: group
-    for group in SYNONYM_GROUPS
-    for word in group
-}
+def tokenize(value: str) -> set[str]:
+    """Convert text into lowercase words for matching."""
 
-
-# Normalize common Tamil word forms.
-# Add more entries as you test real farmer questions.
-TAMIL_WORD_MAP = {
-    # Paddy
-    "நெற்பயிரில்": "நெல்",
-    "நெற்பயிர்": "நெல்",
-    "நெற்பயிரை": "நெல்",
-    "நெற்பயிருக்கு": "நெல்",
-    "நெல்லில்": "நெல்",
-    "நெல்": "நெல்",
-
-    # Pests
-    "பூச்சிகளை": "பூச்சி",
-    "பூச்சியின்": "பூச்சி",
-    "பூச்சிகள்": "பூச்சி",
-    "பூச்சியை": "பூச்சி",
-    "பூச்சியால்": "பூச்சி",
-    "பூச்சிக்கு": "பூச்சி",
-    "பூச்சி": "பூச்சி",
-
-    # Management and control
-    "கட்டுப்படுத்துவது": "கட்டுப்பாடு",
-    "கட்டுப்படுத்த": "கட்டுப்பாடு",
-    "கட்டுப்படுத்துவது எப்படி": "கட்டுப்பாடு",
-    "கட்டுப்பாடு": "கட்டுப்பாடு",
-    "மேலாண்மை": "கட்டுப்பாடு",
-
-    # Soil
-    "மண்ணின்": "மண்",
-    "மண்ணை": "மண்",
-    "மண்ணில்": "மண்",
-    "மண்ணுக்கு": "மண்",
-    "மண்": "மண்",
-
-    # Fertilizer
-    "உரங்கள்": "உரம்",
-    "உரத்தை": "உரம்",
-    "உரமிடுதல்": "உரம்",
-    "உரம்": "உரம்",
-
-    # Water
-    "தண்ணீரை": "தண்ணீர்",
-    "தண்ணீரில்": "தண்ணீர்",
-    "நீர்ப்பாசனம்": "பாசனம்",
-    "பாசனம்": "பாசனம்",
-}
-
-
-def normalize_text(text: str) -> str:
-    """Keep English and Tamil letters and digits."""
-    text = (text or "").lower().replace("-", " ")
-
-    return " ".join(
-        re.findall(
-            r"[a-zA-Z0-9\u0B80-\u0BFF]+",
-            text,
-        )
-    )
-
-
-def terms(text: str) -> set[str]:
-    """Extract searchable words from a question or entry."""
-    words = normalize_text(text).split()
+    punctuation = ".,?!:;()[]{}\"'"
 
     return {
-        word
-        for word in words
-        if len(word) > 1 and word not in STOP_WORDS
+        word.strip(punctuation).lower()
+        for word in value.split()
+        if len(word.strip(punctuation)) > 1
     }
 
 
-def canonical_terms(words: set[str]) -> set[str]:
-    """Normalize Tamil variations and English synonyms."""
-    result = set()
+def is_tamil(value: str) -> bool:
+    """Check whether the question contains Tamil characters."""
 
-    for word in words:
-        word = TAMIL_WORD_MAP.get(word, word)
-
-        group = SYNONYM_LOOKUP.get(word)
-
-        if group:
-            result.add(sorted(group)[0])
-        else:
-            result.add(word)
-
-    return result
+    return any(
+        "\u0B80" <= character <= "\u0BFF"
+        for character in value
+    )
 
 
-def calculate_score(
-    question: str,
-    entry: KnowledgeEntry,
-) -> float:
-    """Score an entry using its title, keywords and content."""
+def calculate_score(question: str, entry: dict) -> float:
+    """
+    Compare the user's question with the knowledge entry's
+    category and stored questions in English and Tamil.
+    """
 
-    query_terms = canonical_terms(terms(question))
+    user_words = tokenize(question)
 
-    if not query_terms:
+    searchable_text = " ".join([
+        str(entry.get("category") or ""),
+        str(entry.get("question_en") or ""),
+        str(entry.get("question_ta") or ""),
+    ])
+
+    knowledge_words = tokenize(searchable_text)
+
+    if not user_words or not knowledge_words:
         return 0.0
 
-    title_terms = canonical_terms(terms(entry.title or ""))
-    keyword_terms = canonical_terms(terms(entry.keywords or ""))
-    content_terms = canonical_terms(terms(entry.content or ""))
+    matching_words = user_words.intersection(knowledge_words)
 
-    searchable_terms = title_terms | keyword_terms | content_terms
-
-    if not searchable_terms:
-        return 0.0
-
-    matched_terms = query_terms & searchable_terms
-
-    query_coverage = len(matched_terms) / len(query_terms)
-
-    title_matches = len(query_terms & title_terms)
-    keyword_matches = len(query_terms & keyword_terms)
-
-    title_bonus = min(
-        0.20,
-        title_matches / len(query_terms) * 0.20,
-    )
-
-    keyword_bonus = min(
-        0.25,
-        keyword_matches / len(query_terms) * 0.25,
-    )
-
-    return min(
-        1.0,
-        query_coverage + title_bonus + keyword_bonus,
-    )
+    return len(matching_words) / len(user_words)
 
 
-@router.post("/ask", response_model=AssistantResponse)
+# --------------------------------------------------
+# Ask farming assistant
+# --------------------------------------------------
+
+@router.post(
+    "/ask",
+    response_model=AssistantResponse
+)
 def ask_assistant(
-    data: AssistantQuestion,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    request: AssistantRequest,
+    db: Session = Depends(get_db)
 ):
-    question = " ".join((data.question or "").split())
+    question = request.question.strip()
 
+    # Validate the user's question.
     if not question:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Please enter a farming question.",
+        return AssistantResponse(
+            status="community",
+            answer="Please enter a farming question.",
+            source=None,
+            message="Please provide a question to continue."
         )
 
-    # Only reviewed, verified entries may answer farmers.
-    entries = db.scalars(
-        select(KnowledgeEntry).where(
-            KnowledgeEntry.is_verified.is_(True)
-        )
-    ).all()
+    # Retrieve only verified knowledge entries.
+    query = text("""
+        SELECT
+            id,
+            category,
+            question_en,
+            question_ta,
+            answer_en,
+            answer_ta,
+            source_name,
+            source_url
+        FROM farming_knowledge_seed
+        WHERE review_status = 'verified'
+    """)
 
+    result = db.execute(query)
+
+    entries = [
+        dict(row)
+        for row in result.mappings().all()
+    ]
+
+    # Find the best matching knowledge entry.
     best_entry = None
     best_score = 0.0
 
@@ -226,32 +132,55 @@ def ask_assistant(
             best_score = score
             best_entry = entry
 
-    MATCH_THRESHOLD = 0.45
+    # Return an answer only when the match is sufficient.
+    if best_entry is not None and best_score >= 0.45:
 
-    if best_entry is not None and best_score >= MATCH_THRESHOLD:
+        # Select the answer language based on the question.
+        if is_tamil(question):
+            answer = (
+                best_entry.get("answer_ta")
+                or best_entry.get("answer_en")
+            )
+        else:
+            answer = (
+                best_entry.get("answer_en")
+                or best_entry.get("answer_ta")
+            )
+
+        source_name = best_entry.get("source_name")
+        source_url = best_entry.get("source_url")
+
+        # Build the source information.
+        if source_name and source_url:
+            source = f"{source_name} ({source_url})"
+        elif source_name:
+            source = source_name
+        elif source_url:
+            source = source_url
+        else:
+            source = None
+
         return AssistantResponse(
             status="answered",
-            answer=best_entry.content,
-            source=best_entry.source,
+            answer=answer,
+            source=source,
             message=(
-                "Answer retrieved from the verified "
-                "farming knowledge base."
-            ),
+                "Answer retrieved from the farming "
+                "knowledge base."
+            )
         )
 
-    # No sufficiently relevant verified answer was found.
-    community_question = create_assistant_question(
-        db,
-        user.id,
-        question,
-    )
+    # No sufficiently matching answer was found.
+    # Submit the question to the existing community workflow.
+    create_assistant_question(db, question)
 
     return AssistantResponse(
         status="community",
-        community_question_id=community_question.id,
-        message=(
-            "I couldn't find a sufficiently relevant verified "
-            "answer. Your question has been posted to the "
-            "farmer community."
+        answer=(
+            "Sorry, I couldn't find a sufficiently matching "
+            "answer in the farming knowledge base. "
+            "Your question has been submitted to the community."
         ),
+        source=None,
+        message="Community assistance is needed."
     )
