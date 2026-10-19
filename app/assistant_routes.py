@@ -8,12 +8,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import SessionLocal
 from app.assistant_schemas import AssistantQuestion, AssistantResponse
-from app.assistant_service import create_assistant_question
-
+from app.auth_routes import get_current_user
+from app.community_routes import create_assistant_question
+from app.models import User
 
 router = APIRouter(
     prefix="/assistant",
-    tags=["Assistant"]
+    tags=["Assistant"],
 )
 
 
@@ -34,7 +35,7 @@ def get_db():
 # --------------------------------------------------
 
 def normalize_text(value: str) -> str:
-    """Normalize text for reliable question comparison."""
+    """Normalize text for question comparison."""
     value = value.lower().strip()
     value = re.sub(r"[?.!,;:]+$", "", value)
     value = re.sub(r"\s+", " ", value)
@@ -42,10 +43,13 @@ def normalize_text(value: str) -> str:
 
 
 def tokenize(value: str) -> set[str]:
-    """Convert text into lowercase words."""
+    """Extract English words, numbers, and Tamil words."""
     return {
         word.lower()
-        for word in re.findall(r"[a-z0-9]+|[\u0B80-\u0BFF]+", value.lower())
+        for word in re.findall(
+            r"[a-z0-9]+|[\u0B80-\u0BFF]+",
+            value.lower(),
+        )
         if len(word) > 1
     }
 
@@ -56,7 +60,7 @@ def is_tamil(value: str) -> bool:
 
 
 def calculate_score(question: str, entry: dict) -> float:
-    """Prioritize exact matches, then compare question keywords."""
+    """Score a question against a knowledge-base entry."""
 
     user_question = normalize_text(question)
 
@@ -67,21 +71,23 @@ def calculate_score(question: str, entry: dict) -> float:
         str(entry.get("question_ta") or "")
     )
 
-    # Exact question match
+    # Exact match
     if user_question == english_question:
         return 1.0
 
     if user_question == tamil_question:
         return 1.0
 
-    # Partial keyword match
+    # Keyword match
     user_words = tokenize(user_question)
 
-    searchable_text = " ".join([
-        str(entry.get("category") or ""),
-        str(entry.get("question_en") or ""),
-        str(entry.get("question_ta") or ""),
-    ])
+    searchable_text = " ".join(
+        [
+            str(entry.get("category") or ""),
+            str(entry.get("question_en") or ""),
+            str(entry.get("question_ta") or ""),
+        ]
+    )
 
     knowledge_words = tokenize(searchable_text)
 
@@ -99,25 +105,25 @@ def calculate_score(question: str, entry: dict) -> float:
 
 @router.post(
     "/ask",
-    response_model=AssistantResponse
+    response_model=AssistantResponse,
 )
 def ask_assistant(
     request: AssistantQuestion,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     question = request.question.strip()
 
     if not question:
-        return AssistantResponse(
-            status="community",
-            answer="Please enter a farming question.",
-            source=None,
-            message="Please provide a question to continue."
+        raise HTTPException(
+            status_code=400,
+            detail="Please enter a farming question.",
         )
 
+    # Retrieve verified knowledge entries.
     try:
-        # Retrieve verified knowledge entries.
-        query = text("""
+        query = text(
+            """
             SELECT
                 id,
                 category,
@@ -129,7 +135,8 @@ def ask_assistant(
                 source_url
             FROM farming_knowledge_seed
             WHERE LOWER(TRIM(review_status)) = 'verified'
-        """)
+            """
+        )
 
         entries = [
             dict(row)
@@ -137,11 +144,9 @@ def ask_assistant(
         ]
 
     except SQLAlchemyError:
-        # Do not silently report a database failure as
-        # an ordinary knowledge-base miss.
         raise HTTPException(
             status_code=500,
-            detail="Unable to query the farming knowledge base."
+            detail="Unable to query the farming knowledge base.",
         )
 
     # Find the strongest matching entry.
@@ -155,11 +160,11 @@ def ask_assistant(
             best_score = score
             best_entry = entry
 
-        # Exact match cannot be improved.
         if score == 1.0:
             break
 
-    # Require both a sufficient match and a stored answer.
+    # Return an answer only when a sufficiently relevant
+    # verified entry contains an answer.
     if (
         best_entry is not None
         and best_score >= 0.45
@@ -191,26 +196,50 @@ def ask_assistant(
             status="answered",
             answer=answer,
             source=source,
-            message="Answer retrieved from the farming knowledge base."
+            message=(
+                "Answer retrieved from the farming knowledge base."
+            ),
         )
 
-    # No sufficiently relevant answer was found.
+    # No sufficiently relevant verified answer was found.
+    # Create or reuse a community question.
     try:
-        create_assistant_question(db, question)
+        community_question = create_assistant_question(
+            db=db,
+            user_id=user.id,
+            title=question,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unable to save the community question. "
+                "Please try again."
+            ),
+        )
+
     except Exception:
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail="No verified answer was found, and the community question could not be saved."
+            detail="Unable to create the community question.",
         )
 
     return AssistantResponse(
         status="community",
         answer=None,
         source=None,
-        community_question_id=None,
+        community_question_id=community_question.id,
         message=(
             "I couldn't find a sufficiently relevant verified answer. "
             "Your question has been posted to the farmer community."
-        )
+        ),
     )
