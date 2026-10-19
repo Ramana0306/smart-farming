@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.assistant_schemas import AssistantRequest, AssistantResponse
+from app.assistant_schemas import AssistantQuestion, AssistantResponse
 from app.assistant_service import create_assistant_question
 
 
@@ -85,7 +85,7 @@ def calculate_score(question: str, entry: dict) -> float:
     response_model=AssistantResponse
 )
 def ask_assistant(
-    request: AssistantRequest,
+    request: AssistantQuestion,
     db: Session = Depends(get_db)
 ):
     question = request.question.strip()
