@@ -88,102 +88,6 @@ The project focuses on multilingual accessibility, verified knowledge retrieval,
 
 The application is publicly hosted. Backend services on free hosting plans may take some time to wake up after periods of inactivity.
 
-## 🚀 Run Locally
-
-### Prerequisites
-
-Install the following tools:
-
-- Python 3.10 or a compatible version required by the project dependencies
-- Node.js and npm
-- Git
-- PostgreSQL, or access to a compatible hosted PostgreSQL database
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/Ramana0306/smart-farming.git
-cd smart-farming
-```
-
-### 2. Set up the backend
-
-Create and activate a virtual environment.
-
-**Windows PowerShell:**
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Install the Python dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configure environment variables
-
-Create a `.env` file in the backend project directory if your application uses it. Configure the database connection string and any other environment variables required by your code.
-
-Example:
-
-```env
-DATABASE_URL=your_postgresql_connection_string
-SECRET_KEY=your_long_random_secret
-```
-
-These are examples of configuration values. Use the actual variable names expected by your application, and never commit real passwords, tokens, or secret keys.
-
-### 4. Start the backend
-
-```bash
-python -m fastapi dev main.py
-```
-
-Open the interactive API documentation:
-
-http://127.0.0.1:8000/docs
-
-### 5. Start the frontend
-
-Open another terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open the local URL displayed by Vite in your terminal.
-
-Ensure the frontend API configuration points to your local backend when developing locally.
-
-## 🔌 API Overview
-
-The backend exposes REST endpoints for authentication, assistant questions, and community interactions.
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /assistant/ask` | Search for a farming answer or create a community question |
-| `GET /community/questions` | Retrieve community questions and their answers |
-| `POST /community/questions/{question_id}/answers` | Submit an answer to a community question |
-| `GET /docs` | Explore the API interactively |
-
-Authentication endpoints are also available in the backend.
-
-For request schemas, authentication requirements, and response formats, refer to the live [Swagger API documentation](https://smart-farming-api-70uh.onrender.com/docs).
-
-## 🔒 Security and Limitations
-
-- Keep database credentials and authentication secrets in environment variables.
-- Do not commit `.env` files containing real credentials.
-- Only entries marked as verified by the application are considered by the assistant.
-- A verified database status does not, by itself, guarantee that the underlying agricultural information has been independently fact-checked.
-- Keyword-based matching may return an imperfect match or fail to recognize a valid question.
-- Community contributions should be reviewed before being treated as verified agricultural guidance.
-- Do not rely on this student project as a replacement for qualified agricultural advice.
 
 ## 🔮 Future Enhancements
 
@@ -219,4 +123,3 @@ B.Tech Information Technology
 
 If you find this project useful, consider giving the repository a ⭐ on GitHub.
 
-*Built as a student project to explore full-stack development, multilingual farming information, and community-based knowledge sharing.*
